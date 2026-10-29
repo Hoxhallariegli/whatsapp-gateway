@@ -57,38 +57,49 @@ function fetchCloudApi(endpoint, method = 'GET', data = null) {
                 });
             });
 
-            req.on('error', () => resolve(null));
+            req.on('error', (e) => {
+                console.error(`❌ [CLOUD API ERROR] ${method} ${endpoint}:`, e.message);
+                resolve(null);
+            });
             req.on('timeout', () => { req.destroy(); resolve(null); });
 
             if (bodyStr) req.write(bodyStr);
             req.end();
-        } catch (_) {
+        } catch (e) {
+            console.error(`❌ [CLOUD API CATCH] ${method} ${endpoint}:`, e.message);
             resolve(null);
         }
     });
 }
 
-// Sync session folder files to Laravel Database Cloud
+// Sync essential session files (creds.json & app-state-sync) to Laravel Database Cloud
 async function syncSessionToCloud(cleanKey) {
     try {
-        const sessionDir = path.join(__dirname, 'whatsapp_sessions', cleanKey);
+        const fullKey = cleanKey.startsWith('shop_') || cleanKey.startsWith('barber_') ? cleanKey : `shop_${cleanKey}`;
+        const sessionDir = path.join(__dirname, 'whatsapp_sessions', fullKey);
         if (!fs.existsSync(sessionDir)) return;
+
+        const credsFile = path.join(sessionDir, 'creds.json');
+        if (!fs.existsSync(credsFile)) return;
 
         const files = {};
         const fileNames = fs.readdirSync(sessionDir);
         for (const name of fileNames) {
-            const filePath = path.join(sessionDir, name);
-            if (fs.statSync(filePath).isFile()) {
-                files[name] = fs.readFileSync(filePath, 'base64');
+            // Filter creds.json and app-state keys (~10KB max, lightweight & fast)
+            if (name === 'creds.json' || name.startsWith('app-state-sync')) {
+                const filePath = path.join(sessionDir, name);
+                if (fs.statSync(filePath).isFile()) {
+                    files[name] = fs.readFileSync(filePath, 'base64');
+                }
             }
         }
 
         if (Object.keys(files).length > 0) {
-            await fetchCloudApi('save', 'POST', {
-                session_key: cleanKey,
+            const res = await fetchCloudApi('save', 'POST', {
+                session_key: fullKey,
                 files: files
             });
-            console.log(`☁️ [CLOUD SYNC] Seanca ${cleanKey} u ruajt në bazën e të dhënave të Hostinger!`);
+            console.log(`☁️ [CLOUD SYNC RESULT] ${fullKey}:`, JSON.stringify(res));
         }
     } catch (e) {
         console.warn('Sync error:', e.message);
@@ -98,8 +109,9 @@ async function syncSessionToCloud(cleanKey) {
 // Delete session from Laravel Database Cloud
 async function deleteSessionFromCloud(cleanKey) {
     try {
-        await fetchCloudApi('delete', 'POST', { session_key: cleanKey });
-        console.log(`☁️ [CLOUD DELETE] Seanca ${cleanKey} u fshi nga baza e të dhënave të Hostinger.`);
+        const fullKey = cleanKey.startsWith('shop_') || cleanKey.startsWith('barber_') ? cleanKey : `shop_${cleanKey}`;
+        await fetchCloudApi('delete', 'POST', { session_key: fullKey });
+        console.log(`☁️ [CLOUD DELETE] Seanca ${fullKey} u fshi nga baza e të dhënave të Hostinger.`);
     } catch (_) {}
 }
 
