@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 const logger = pino({ level: 'silent' });
 
@@ -37,6 +37,8 @@ function fetchCloudApi(endpoint, method = 'GET', data = null) {
             const client = urlObj.protocol === 'https:' ? https : http;
             const bodyStr = data ? JSON.stringify(data) : null;
 
+            console.log(`🌐 [CLOUD API REQ] ${method} ${urlObj.toString()}`);
+
             const req = client.request(urlObj, {
                 method: method,
                 headers: {
@@ -44,11 +46,12 @@ function fetchCloudApi(endpoint, method = 'GET', data = null) {
                     'X-API-KEY': API_SECRET,
                     ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {})
                 },
-                timeout: 8000
+                timeout: 10000
             }, (res) => {
                 let resData = '';
                 res.on('data', chunk => resData += chunk);
                 res.on('end', () => {
+                    console.log(`🌐 [CLOUD API RES] ${method} ${endpoint} Status: ${res.statusCode} Body: ${resData}`);
                     try {
                         resolve(JSON.parse(resData));
                     } catch (_) {
@@ -61,7 +64,11 @@ function fetchCloudApi(endpoint, method = 'GET', data = null) {
                 console.error(`❌ [CLOUD API ERROR] ${method} ${endpoint}:`, e.message);
                 resolve(null);
             });
-            req.on('timeout', () => { req.destroy(); resolve(null); });
+            req.on('timeout', () => {
+                console.error(`❌ [CLOUD API TIMEOUT] ${method} ${endpoint}`);
+                req.destroy();
+                resolve(null);
+            });
 
             if (bodyStr) req.write(bodyStr);
             req.end();
@@ -72,29 +79,28 @@ function fetchCloudApi(endpoint, method = 'GET', data = null) {
     });
 }
 
-// Sync essential session files (creds.json & app-state-sync) to Laravel Database Cloud
+// Sync session folder files to Laravel Database Cloud
 async function syncSessionToCloud(cleanKey) {
     try {
         const fullKey = cleanKey.startsWith('shop_') || cleanKey.startsWith('barber_') ? cleanKey : `shop_${cleanKey}`;
         const sessionDir = path.join(__dirname, 'whatsapp_sessions', fullKey);
-        if (!fs.existsSync(sessionDir)) return;
 
-        const credsFile = path.join(sessionDir, 'creds.json');
-        if (!fs.existsSync(credsFile)) return;
+        if (!fs.existsSync(sessionDir)) {
+            console.warn(`⚠️ [SYNC CHECK] Session directory does not exist yet: ${sessionDir}`);
+            return;
+        }
 
         const files = {};
         const fileNames = fs.readdirSync(sessionDir);
         for (const name of fileNames) {
-            // Filter creds.json and app-state keys (~10KB max, lightweight & fast)
-            if (name === 'creds.json' || name.startsWith('app-state-sync')) {
-                const filePath = path.join(sessionDir, name);
-                if (fs.statSync(filePath).isFile()) {
-                    files[name] = fs.readFileSync(filePath, 'base64');
-                }
+            const filePath = path.join(sessionDir, name);
+            if (fs.statSync(filePath).isFile()) {
+                files[name] = fs.readFileSync(filePath, 'base64');
             }
         }
 
         if (Object.keys(files).length > 0) {
+            console.log(`📤 [CLOUD SYNC START] Syncing ${Object.keys(files).length} files for ${fullKey}...`);
             const res = await fetchCloudApi('save', 'POST', {
                 session_key: fullKey,
                 files: files
@@ -102,7 +108,7 @@ async function syncSessionToCloud(cleanKey) {
             console.log(`☁️ [CLOUD SYNC RESULT] ${fullKey}:`, JSON.stringify(res));
         }
     } catch (e) {
-        console.warn('Sync error:', e.message);
+        console.error('❌ [CLOUD SYNC ERROR]:', e.message);
     }
 }
 
@@ -118,6 +124,7 @@ async function deleteSessionFromCloud(cleanKey) {
 // Restore saved sessions from Laravel Database Cloud on server startup
 async function restoreSessionsFromCloud() {
     try {
+        console.log('📦 [CLOUD RESTORE START] Fetching saved sessions from Hostinger DB...');
         const res = await fetchCloudApi('load', 'GET');
         if (res && res.success && res.sessions) {
             const parentDir = path.join(__dirname, 'whatsapp_sessions');
