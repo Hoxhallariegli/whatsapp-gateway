@@ -323,6 +323,9 @@ async function startSession(fullKey) {
     const sock = makeWASocket({
         auth: state,
         logger: logger,
+        syncFullHistory: true,
+        markOnlineOnConnect: true,
+        fireInitQueries: true,
         getMessage: async (key) => {
             if (key?.id && sentMessages.has(key.id)) {
                 console.log(`🔑 [GET_MESSAGE] Returning exact cached message for decryption retry ID: ${key.id}`);
