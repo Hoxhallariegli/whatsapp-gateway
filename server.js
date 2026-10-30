@@ -505,6 +505,14 @@ app.post('/api/whatsapp/send', async (req, res) => {
         // Direct primary phone JID routing (@s.whatsapp.net) for 100% clean decryption
         const targetJid = `${cleanPhone}@s.whatsapp.net`;
 
+        // Instant Pre-Key Session Handshake: Send composing presence to force Meta pre-key exchange before text!
+        try {
+            await sock.presenceSubscribe(targetJid);
+            await sock.sendPresenceUpdate('composing', targetJid);
+            await new Promise(r => setTimeout(r, 200)); // 200ms pre-key exchange window
+            await sock.sendPresenceUpdate('paused', targetJid);
+        } catch (_) {}
+
         const sent = await sock.sendMessage(targetJid, { text: message });
 
         const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
