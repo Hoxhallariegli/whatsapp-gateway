@@ -149,6 +149,14 @@ async function restoreSessionsFromCloud() {
             for (const [key, files] of Object.entries(res.sessions)) {
                 if (typeof files === 'object' && files !== null) {
                     const sessionDir = path.join(parentDir, key);
+
+                    // Do NOT overwrite local files if creds.json already exists locally!
+                    if (fs.existsSync(path.join(sessionDir, 'creds.json'))) {
+                        console.log(`📦 [CLOUD RESTORE SKIP] Seanca ${key} ekziston lokalisht. Po ngarkohet pa e mbishkruar...`);
+                        getOrStartSession(key);
+                        continue;
+                    }
+
                     if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
                     for (const [fileName, base64Content] of Object.entries(files)) {
@@ -164,6 +172,15 @@ async function restoreSessionsFromCloud() {
         console.warn('Cloud restore warning:', e.message);
     }
 }
+
+// Periodic background sync every 2 minutes for connected sessions
+setInterval(() => {
+    for (const [key, status] of sessionStatus.entries()) {
+        if (status && status.connected) {
+            syncSessionToCloud(key);
+        }
+    }
+}, 2 * 60 * 1000);
 
 // Store active WhatsApp sockets, status, in-flight promises & sent messages cache
 const sessions = new Map();
