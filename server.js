@@ -1,4 +1,4 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, BufferJSON } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import express from 'express';
 import path from 'path';
@@ -217,19 +217,20 @@ setInterval(() => {
     }
 }, 2 * 60 * 1000);
 
-// Store active WhatsApp sockets, status, in-flight promises & sent messages cache
+// Store active WhatsApp sockets, status, in-flight promises, watchers & sent messages cache
 const sessions = new Map();
 const sessionStatus = new Map();
 const startingSessions = new Map();
+const watchers = new Map();
 const sentMessages = new Map(); // msgId -> Baileys message object for exact getMessage retry decryption
 
-// Load sent messages cache from disk on startup
+// Load sent messages cache from disk on startup (using Baileys BufferJSON.reviver)
 function loadSentMessagesFromDisk(fullKey) {
     try {
         const filePath = path.join(__dirname, 'whatsapp_sessions', fullKey, 'sent_messages.json');
         if (fs.existsSync(filePath)) {
             const raw = fs.readFileSync(filePath, 'utf-8');
-            const data = JSON.parse(raw);
+            const data = JSON.parse(raw, BufferJSON.reviver);
             for (const [msgId, msgObj] of Object.entries(data)) {
                 sentMessages.set(msgId, msgObj);
             }
@@ -240,7 +241,7 @@ function loadSentMessagesFromDisk(fullKey) {
     }
 }
 
-// Save sent messages cache to disk
+// Save sent messages cache to disk (using Baileys BufferJSON.replacer)
 function saveSentMessageToDisk(fullKey, msgId, msgObj) {
     try {
         sentMessages.set(msgId, msgObj);
@@ -250,7 +251,7 @@ function saveSentMessageToDisk(fullKey, msgId, msgObj) {
         const filePath = path.join(sessionDir, 'sent_messages.json');
         let current = {};
         if (fs.existsSync(filePath)) {
-            try { current = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch (_) {}
+            try { current = JSON.parse(fs.readFileSync(filePath, 'utf-8'), BufferJSON.reviver); } catch (_) {}
         }
         current[msgId] = msgObj;
 
@@ -261,7 +262,7 @@ function saveSentMessageToDisk(fullKey, msgId, msgObj) {
             for (const k of extra) delete current[k];
         }
 
-        fs.writeFileSync(filePath, JSON.stringify(current));
+        fs.writeFileSync(filePath, JSON.stringify(current, BufferJSON.replacer));
     } catch (e) {
         console.warn('Error saving sent message cache:', e.message);
     }
@@ -275,12 +276,9 @@ async function getOrStartSession(sessionKey = 'default', forceFresh = false) {
     const fullKey = cleanKey.startsWith('shop_') || cleanKey.startsWith('barber_') ? cleanKey : `shop_${cleanKey}`;
 
     if (forceFresh) {
-        if (sessions.has(fullKey)) {
-            try {
-                sessions.get(fullKey)?.end(new Error('Force fresh session requested'));
-            } catch (_) {}
-            sessions.delete(fullKey);
-        }
+        const oldSock = sessions.get(fullKey);
+        sessions.delete(fullKey);
+        try { oldSock?.end(new Error('Force fresh session requested')); } catch (_) {}
         purgeSessionDir(fullKey);
         deleteSessionFromCloud(fullKey);
     }
@@ -310,9 +308,12 @@ async function startSession(fullKey) {
         fs.mkdirSync(sessionDir, { recursive: true });
     }
 
-    // Real-time FS Watcher: Syncs immediately when pre-keys/creds change on disk
+    // Real-time FS Watcher: Syncs immediately when pre-keys/creds change on disk (single watcher per key)
+    watchers.get(fullKey)?.close();
     try {
-        fs.watch(sessionDir, () => scheduleSyncToCloud(fullKey));
+        const w = fs.watch(sessionDir, () => scheduleSyncToCloud(fullKey));
+        w.on('error', () => {});
+        watchers.set(fullKey, w);
     } catch (_) {}
 
     loadSentMessagesFromDisk(fullKey);
@@ -353,6 +354,9 @@ async function startSession(fullKey) {
         }
 
         if (connection === 'close') {
+            // Guard: Ignore close events from stale/old closed sockets!
+            if (sessions.get(fullKey) !== sock) return;
+
             sessionStatus.set(fullKey, { connected: false, qr: null, qrImage: null, phone: null });
             const isLoggedOut = (lastDisconnect?.error?.output?.statusCode === DisconnectReason.loggedOut);
 
@@ -365,12 +369,12 @@ async function startSession(fullKey) {
                 const credsExistNow = fs.existsSync(path.join(sessionDir, 'creds.json'));
                 if (credsExistNow) {
                     console.log(`🔄 [SESSION ${fullKey}] Lidhja u mbyll përkohësisht. Po ri-lidhet automatikisht...`);
-                    try { sessions.get(fullKey)?.end(undefined); } catch (_) {}
+                    try { sock.end(undefined); } catch (_) {}
                     sessions.delete(fullKey);
                     setTimeout(() => getOrStartSession(fullKey), 5000);
                 } else {
                     console.log(`⏸️ [SESSION ${fullKey}] Seancë e palidhur. Po pret kërkesën për QR Code...`);
-                    try { sessions.get(fullKey)?.end(undefined); } catch (_) {}
+                    try { sock.end(undefined); } catch (_) {}
                     sessions.delete(fullKey);
                 }
             }
@@ -414,21 +418,15 @@ app.get('/api/whatsapp/status', async (req, res) => {
     });
 });
 
-// Get QR Code SPECIFIC per session key (Generates QR ON DEMAND & Wipes stale residue if disconnected)
+// Get QR Code SPECIFIC per session key (Generates QR ON DEMAND & Wipes stale residue ONLY IF requested with ?fresh=1)
 app.get('/api/whatsapp/qr', async (req, res) => {
     let key = (req.query.session_key || req.query.shop_id || '1').toString().trim();
     const fullKey = key.startsWith('shop_') || key.startsWith('barber_') ? key : `shop_${key}`;
+    const forceFresh = req.query.fresh === '1';
+
+    await getOrStartSession(fullKey, forceFresh);
 
     let status = sessionStatus.get(fullKey);
-
-    // If session is disconnected, force a squeaky clean fresh session directory
-    if (!status?.connected) {
-        await getOrStartSession(fullKey, true);
-    } else {
-        await getOrStartSession(fullKey, false);
-    }
-
-    status = sessionStatus.get(fullKey);
     let attempts = 0;
 
     while (!status?.connected && !status?.qrImage && attempts < 10) {
@@ -516,7 +514,7 @@ app.post('/api/whatsapp/send', async (req, res) => {
 
         const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
 
-        // Store sent message in memory + persist to sent_messages.json for exact decryption retry across server restarts!
+        // Store sent message in memory + persist to sent_messages.json using BufferJSON for exact decryption retry across server restarts!
         if (sent?.key?.id && sent?.message) {
             saveSentMessageToDisk(currentActiveKey, sent.key.id, sent.message);
         }
