@@ -166,6 +166,7 @@ async function restoreSessionsFromCloud() {
                     // Do NOT overwrite local files if creds.json already exists locally!
                     if (fs.existsSync(path.join(sessionDir, 'creds.json'))) {
                         console.log(`📦 [CLOUD RESTORE SKIP] Seanca ${key} ekziston lokalisht. Po ngarkohet pa e mbishkruar...`);
+                        loadSentMessagesFromDisk(key);
                         getOrStartSession(key);
                         continue;
                     }
@@ -177,6 +178,7 @@ async function restoreSessionsFromCloud() {
                         fs.writeFileSync(filePath, Buffer.from(base64Content, 'base64'));
                     }
                     console.log(`📦 [CLOUD RESTORE] Seanca ${key} u rikthye automatikisht nga baza e të dhënave!`);
+                    loadSentMessagesFromDisk(key);
                     getOrStartSession(key);
                 }
             }
@@ -200,6 +202,50 @@ const sessions = new Map();
 const sessionStatus = new Map();
 const startingSessions = new Map();
 const sentMessages = new Map(); // msgId -> Baileys message object for exact getMessage retry decryption
+
+// Load sent messages cache from disk on startup
+function loadSentMessagesFromDisk(fullKey) {
+    try {
+        const filePath = path.join(__dirname, 'whatsapp_sessions', fullKey, 'sent_messages.json');
+        if (fs.existsSync(filePath)) {
+            const raw = fs.readFileSync(filePath, 'utf-8');
+            const data = JSON.parse(raw);
+            for (const [msgId, msgObj] of Object.entries(data)) {
+                sentMessages.set(msgId, msgObj);
+            }
+            console.log(`🔑 [SENT CACHE LOADED] Restored ${Object.keys(data).length} sent messages for decryption retry for ${fullKey}`);
+        }
+    } catch (e) {
+        console.warn('Error loading sent messages cache:', e.message);
+    }
+}
+
+// Save sent messages cache to disk
+function saveSentMessageToDisk(fullKey, msgId, msgObj) {
+    try {
+        sentMessages.set(msgId, msgObj);
+        const sessionDir = path.join(__dirname, 'whatsapp_sessions', fullKey);
+        if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+        const filePath = path.join(sessionDir, 'sent_messages.json');
+        let current = {};
+        if (fs.existsSync(filePath)) {
+            try { current = JSON.parse(fs.readFileSync(filePath, 'utf-8')); } catch (_) {}
+        }
+        current[msgId] = msgObj;
+
+        // Keep only last 50 sent messages to keep file small
+        const keys = Object.keys(current);
+        if (keys.length > 50) {
+            const extra = keys.slice(0, keys.length - 50);
+            for (const k of extra) delete current[k];
+        }
+
+        fs.writeFileSync(filePath, JSON.stringify(current));
+    } catch (e) {
+        console.warn('Error saving sent message cache:', e.message);
+    }
+}
 
 /**
  * Public Entry Point: Prevents duplicate concurrent socket initializations
@@ -243,6 +289,8 @@ async function startSession(fullKey) {
     if (!fs.existsSync(sessionDir)) {
         fs.mkdirSync(sessionDir, { recursive: true });
     }
+
+    loadSentMessagesFromDisk(fullKey);
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
@@ -439,13 +487,13 @@ app.post('/api/whatsapp/send', async (req, res) => {
 
         const sent = await sock.sendMessage(targetJid, { text: message });
 
-        // Store sent message in sentMessages cache for exact Baileys getMessage retry decryption
+        const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
+
+        // Store sent message in memory + persist to sent_messages.json for exact decryption retry across server restarts!
         if (sent?.key?.id && sent?.message) {
-            sentMessages.set(sent.key.id, sent.message);
-            setTimeout(() => sentMessages.delete(sent.key.id), 30 * 60 * 1000); // 30 min cache
+            saveSentMessageToDisk(currentActiveKey, sent.key.id, sent.message);
         }
 
-        const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
         scheduleSyncToCloud(currentActiveKey);
 
         console.log(`📩 [WHATSAPP SENT SUCCESS] Session ${currentActiveKey} sent message to ${targetJid}`);
