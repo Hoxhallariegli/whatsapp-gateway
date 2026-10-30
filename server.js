@@ -21,7 +21,7 @@ const logger = pino({ level: 'warn' });
 // Auto-Heal Unhandled Signal Session Rejections in Real-Time
 process.on('unhandledRejection', (reason) => {
     const errStr = String(reason?.stack || reason?.message || reason);
-    if (errStr.includes('SessionError') || errStr.includes('Bad MAC') || errStr.includes('failed to decrypt')) {
+    if (errStr.includes('SessionError') || errStr.includes('Bad MAC') || errStr.includes('failed to decrypt') || errStr.includes('error in handling message')) {
         console.warn('⚠️ [AUTO-HEAL] Intercepted Signal session warning:', errStr.substring(0, 120));
     }
 });
@@ -30,7 +30,7 @@ process.on('unhandledRejection', (reason) => {
 const originalConsoleError = console.error;
 console.error = function(...args) {
     const msg = args.map(a => String(a)).join(' ');
-    if (msg.includes('failed to decrypt message') || msg.includes('Failed to decrypt message') || msg.includes('Session error:')) {
+    if (msg.includes('failed to decrypt message') || msg.includes('Failed to decrypt message') || msg.includes('Session error:') || msg.includes('error in handling message')) {
         return; // Suppress non-fatal Baileys internal background sync noise
     }
     originalConsoleError.apply(console, args);
@@ -567,7 +567,7 @@ app.post('/api/whatsapp/send', async (req, res) => {
             }
             await sock.presenceSubscribe(targetJid);
             await sock.sendPresenceUpdate('composing', targetJid);
-            await new Promise(r => setTimeout(r, 200));
+            await new Promise(r => setTimeout(r, 250));
             await sock.sendPresenceUpdate('paused', targetJid);
         } catch (_) {}
 
