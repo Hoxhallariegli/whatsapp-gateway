@@ -546,13 +546,19 @@ app.post('/api/whatsapp/send', async (req, res) => {
             cleanPhone = '355' + cleanPhone;
         }
 
-        // Direct primary phone JID routing (@s.whatsapp.net) for 100% clean decryption
-        const targetJid = `${cleanPhone}@s.whatsapp.net`;
-
         const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
 
-        // Auto-heal Signal session keys if stale session files detected for this contact
-        purgeContactSignalKeys(currentActiveKey, cleanPhone);
+        // Resolve permanent Meta @lid or primary JID via onWhatsApp
+        let targetJid = `${cleanPhone}@s.whatsapp.net`;
+        try {
+            const results = await sock.onWhatsApp(cleanPhone);
+            if (results && results.length > 0 && results[0]?.jid) {
+                targetJid = results[0].jid; // Resolves to Meta @lid or primary phone JID
+                console.log(`🎯 [META LID RESOLVE] Phone ${cleanPhone} resolved to target JID: ${targetJid}`);
+            }
+        } catch (e) {
+            console.warn('⚠️ Verification check warning:', e.message);
+        }
 
         // Instant Pre-Key Session Handshake: Assert sessions and send composing presence to force Meta pre-key exchange before text!
         try {
