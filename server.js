@@ -18,6 +18,16 @@ app.use(express.json({ limit: '10mb' }));
 // Set logger level to warn for active diagnostic visibility
 const logger = pino({ level: 'warn' });
 
+// Suppress non-fatal Baileys internal background sync noise from console output
+const originalConsoleError = console.error;
+console.error = function(...args) {
+    const msg = args.map(a => String(a)).join(' ');
+    if (msg.includes('failed to decrypt message') || msg.includes('Failed to decrypt message') || msg.includes('Session error:')) {
+        return; // Suppress non-fatal Baileys internal background sync noise
+    }
+    originalConsoleError.apply(console, args);
+};
+
 // Public Health Check Endpoint (No API key required for UptimeRobot / Keep-Alive Pings)
 app.get('/health', (req, res) => {
     return res.json({
