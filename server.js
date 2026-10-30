@@ -15,7 +15,17 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-const logger = pino({ level: 'silent' });
+// Set logger level to warn for active diagnostic visibility
+const logger = pino({ level: 'warn' });
+
+// Public Health Check Endpoint (No API key required for UptimeRobot / Keep-Alive Pings)
+app.get('/health', (req, res) => {
+    return res.json({
+        status: 'online',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
 
 // Security Middleware: Protect API endpoints with X-API-KEY
 const API_SECRET = process.env.WHATSAPP_API_SECRET || 'E4ProTech_Secret_Key_2026_Secure';
@@ -95,7 +105,7 @@ function scheduleSyncToCloud(cleanKey) {
     const timer = setTimeout(() => {
         syncSessionToCloud(cleanKey);
         syncTimers.delete(cleanKey);
-    }, 10000); // 10 second debounce
+    }, 5000); // 5 second debounce for real-time key persistence
     syncTimers.set(cleanKey, timer);
 }
 
@@ -188,6 +198,16 @@ async function restoreSessionsFromCloud() {
     }
 }
 
+// Self-Ping Keep-Alive Timer every 5 minutes to prevent Render Free Tier from sleeping!
+setInterval(() => {
+    try {
+        const myUrl = process.env.RENDER_EXTERNAL_URL || 'https://whatsapp-gateway-k6vv.onrender.com';
+        https.get(`${myUrl}/health`, (r) => {
+            console.log(`⏰ [KEEP-ALIVE PING] Self-ping status: ${r.statusCode}`);
+        }).on('error', () => {});
+    } catch (_) {}
+}, 5 * 60 * 1000);
+
 // Periodic background sync every 2 minutes for connected sessions
 setInterval(() => {
     for (const [key, status] of sessionStatus.entries()) {
@@ -234,7 +254,7 @@ function saveSentMessageToDisk(fullKey, msgId, msgObj) {
         }
         current[msgId] = msgObj;
 
-        // Keep only last 50 sent messages to keep file small
+        // Keep only last 50 sent messages
         const keys = Object.keys(current);
         if (keys.length > 50) {
             const extra = keys.slice(0, keys.length - 50);
@@ -290,6 +310,11 @@ async function startSession(fullKey) {
         fs.mkdirSync(sessionDir, { recursive: true });
     }
 
+    // Real-time FS Watcher: Syncs immediately when pre-keys/creds change on disk
+    try {
+        fs.watch(sessionDir, () => scheduleSyncToCloud(fullKey));
+    } catch (_) {}
+
     loadSentMessagesFromDisk(fullKey);
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -340,10 +365,12 @@ async function startSession(fullKey) {
                 const credsExistNow = fs.existsSync(path.join(sessionDir, 'creds.json'));
                 if (credsExistNow) {
                     console.log(`🔄 [SESSION ${fullKey}] Lidhja u mbyll përkohësisht. Po ri-lidhet automatikisht...`);
+                    try { sessions.get(fullKey)?.end(undefined); } catch (_) {}
                     sessions.delete(fullKey);
                     setTimeout(() => getOrStartSession(fullKey), 5000);
                 } else {
                     console.log(`⏸️ [SESSION ${fullKey}] Seancë e palidhur. Po pret kërkesën për QR Code...`);
+                    try { sessions.get(fullKey)?.end(undefined); } catch (_) {}
                     sessions.delete(fullKey);
                 }
             }
