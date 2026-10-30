@@ -176,6 +176,11 @@ async function getOrStartSession(sessionKey = 'default') {
     const sock = makeWASocket({
         auth: state,
         logger: logger,
+        getMessage: async (key) => {
+            return {
+                conversation: 'Notification Message'
+            };
+        }
     });
 
     sessions.set(cleanKey, sock);
