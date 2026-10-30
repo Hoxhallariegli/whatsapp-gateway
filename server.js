@@ -499,16 +499,8 @@ app.post('/api/whatsapp/send', async (req, res) => {
             cleanPhone = '355' + cleanPhone;
         }
 
-        let targetJid = `${cleanPhone}@s.whatsapp.net`;
-
-        try {
-            const results = await sock.onWhatsApp(cleanPhone);
-            if (results && results.length > 0 && results[0]?.exists) {
-                targetJid = results[0].jid;
-            }
-        } catch (e) {
-            console.warn('⚠️ Verification check warning:', e.message);
-        }
+        // Direct primary phone JID routing (@s.whatsapp.net) for 100% clean decryption
+        const targetJid = `${cleanPhone}@s.whatsapp.net`;
 
         const sent = await sock.sendMessage(targetJid, { text: message });
 
