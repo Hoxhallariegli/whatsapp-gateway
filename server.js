@@ -128,13 +128,26 @@ async function syncSessionToCloud(cleanKey) {
     }
 }
 
-// Delete session from Laravel Database Cloud
+// Delete session from Laravel Database Cloud & Local Storage
 async function deleteSessionFromCloud(cleanKey) {
     try {
         const fullKey = cleanKey.startsWith('shop_') || cleanKey.startsWith('barber_') ? cleanKey : `shop_${cleanKey}`;
         await fetchCloudApi('delete', 'POST', { session_key: fullKey });
         console.log(`☁️ [CLOUD DELETE] Seanca ${fullKey} u fshi nga baza e të dhënave të Hostinger.`);
     } catch (_) {}
+}
+
+// Purge local session directory completely
+function purgeSessionDir(fullKey) {
+    try {
+        const sessionDir = path.join(__dirname, 'whatsapp_sessions', fullKey);
+        if (fs.existsSync(sessionDir)) {
+            fs.rmSync(sessionDir, { recursive: true, force: true });
+            console.log(`🧹 [PURGE] Directory ${fullKey} completely wiped out and destroyed.`);
+        }
+    } catch (e) {
+        console.warn(`Purge error for ${fullKey}:`, e.message);
+    }
 }
 
 // Restore saved sessions from Laravel Database Cloud on server startup
@@ -191,9 +204,20 @@ const sentMessages = new Map(); // msgId -> Baileys message object for exact get
 /**
  * Public Entry Point: Prevents duplicate concurrent socket initializations
  */
-async function getOrStartSession(sessionKey = 'default') {
+async function getOrStartSession(sessionKey = 'default', forceFresh = false) {
     const cleanKey = sessionKey.toString().trim();
     const fullKey = cleanKey.startsWith('shop_') || cleanKey.startsWith('barber_') ? cleanKey : `shop_${cleanKey}`;
+
+    if (forceFresh) {
+        if (sessions.has(fullKey)) {
+            try {
+                sessions.get(fullKey)?.end(new Error('Force fresh session requested'));
+            } catch (_) {}
+            sessions.delete(fullKey);
+        }
+        purgeSessionDir(fullKey);
+        deleteSessionFromCloud(fullKey);
+    }
 
     if (sessions.has(fullKey)) {
         return sessions.get(fullKey);
@@ -261,11 +285,7 @@ async function startSession(fullKey) {
 
             if (isLoggedOut) {
                 console.log(`⚠️ [SESSION ${fullKey}] Përdoruesi bëri Logout. Po fshihen çelësat e vjetër...`);
-                try {
-                    fs.rmSync(sessionDir, { recursive: true, force: true });
-                } catch (e) {
-                    console.warn('Error clearing session dir:', e.message);
-                }
+                purgeSessionDir(fullKey);
                 sessions.delete(fullKey);
                 deleteSessionFromCloud(fullKey);
             } else {
@@ -319,14 +339,21 @@ app.get('/api/whatsapp/status', async (req, res) => {
     });
 });
 
-// Get QR Code SPECIFIC per session key (Generates QR ON DEMAND)
+// Get QR Code SPECIFIC per session key (Generates QR ON DEMAND & Wipes stale residue if disconnected)
 app.get('/api/whatsapp/qr', async (req, res) => {
     let key = (req.query.session_key || req.query.shop_id || '1').toString().trim();
     const fullKey = key.startsWith('shop_') || key.startsWith('barber_') ? key : `shop_${key}`;
 
-    await getOrStartSession(fullKey);
-
     let status = sessionStatus.get(fullKey);
+
+    // If session is disconnected, force a squeaky clean fresh session directory
+    if (!status?.connected) {
+        await getOrStartSession(fullKey, true);
+    } else {
+        await getOrStartSession(fullKey, false);
+    }
+
+    status = sessionStatus.get(fullKey);
     let attempts = 0;
 
     while (!status?.connected && !status?.qrImage && attempts < 10) {
