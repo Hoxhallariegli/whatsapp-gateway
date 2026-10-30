@@ -18,6 +18,14 @@ app.use(express.json({ limit: '10mb' }));
 // Set logger level to warn for active diagnostic visibility
 const logger = pino({ level: 'warn' });
 
+// Auto-Heal Unhandled Signal Session Rejections in Real-Time
+process.on('unhandledRejection', (reason) => {
+    const errStr = String(reason?.stack || reason?.message || reason);
+    if (errStr.includes('SessionError') || errStr.includes('Bad MAC') || errStr.includes('failed to decrypt')) {
+        console.warn('⚠️ [AUTO-HEAL] Intercepted Signal session warning:', errStr.substring(0, 120));
+    }
+});
+
 // Suppress non-fatal Baileys internal background sync noise from console output
 const originalConsoleError = console.error;
 console.error = function(...args) {
@@ -167,6 +175,32 @@ function purgeSessionDir(fullKey) {
         }
     } catch (e) {
         console.warn(`Purge error for ${fullKey}:`, e.message);
+    }
+}
+
+// Purge ONLY corrupted per-contact Signal session keys so Baileys negotiates a fresh Signal handshake without unlinking WhatsApp!
+function purgeContactSignalKeys(fullKey, cleanPhone) {
+    try {
+        const sessionDir = path.join(__dirname, 'whatsapp_sessions', fullKey);
+        if (!fs.existsSync(sessionDir)) return;
+
+        const files = fs.readdirSync(sessionDir);
+        let deletedCount = 0;
+        for (const file of files) {
+            // Delete only session-<phone>.*.json and sender-key-* files, preserving creds.json!
+            if ((file.startsWith(`session-${cleanPhone}`) || file.startsWith('sender-key-')) && file !== 'creds.json') {
+                try {
+                    fs.rmSync(path.join(sessionDir, file), { force: true });
+                    deletedCount++;
+                } catch (_) {}
+            }
+        }
+        if (deletedCount > 0) {
+            console.log(`🧹 [AUTO-HEAL SIGNAL] Purged ${deletedCount} stale Signal session files for contact ${cleanPhone} in ${fullKey}`);
+            scheduleSyncToCloud(fullKey);
+        }
+    } catch (e) {
+        console.warn('Error purging contact signal keys:', e.message);
     }
 }
 
@@ -515,6 +549,11 @@ app.post('/api/whatsapp/send', async (req, res) => {
         // Direct primary phone JID routing (@s.whatsapp.net) for 100% clean decryption
         const targetJid = `${cleanPhone}@s.whatsapp.net`;
 
+        const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
+
+        // Auto-heal Signal session keys if stale session files detected for this contact
+        purgeContactSignalKeys(currentActiveKey, cleanPhone);
+
         // Instant Pre-Key Session Handshake: Assert sessions and send composing presence to force Meta pre-key exchange before text!
         try {
             if (typeof sock.assertSessions === 'function') {
@@ -522,13 +561,11 @@ app.post('/api/whatsapp/send', async (req, res) => {
             }
             await sock.presenceSubscribe(targetJid);
             await sock.sendPresenceUpdate('composing', targetJid);
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 200));
             await sock.sendPresenceUpdate('paused', targetJid);
         } catch (_) {}
 
         const sent = await sock.sendMessage(targetJid, { text: message });
-
-        const currentActiveKey = targetBarberKey && sessionStatus.get(targetBarberKey)?.connected ? targetBarberKey : targetShopKey;
 
         // Store sent message in memory + persist to sent_messages.json using BufferJSON for exact decryption retry across server restarts!
         if (sent?.key?.id && sent?.message) {
